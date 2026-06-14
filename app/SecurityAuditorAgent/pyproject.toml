@@ -1,0 +1,14 @@
+[project]
+name = "gatecheck-security-auditor"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "bedrock-agentcore",
+    "bedrock-agentcore-starter-toolkit",
+    "langgraph",
+    "langchain-aws",
+    "a2a-sdk",
+    "boto3",
+    "uvicorn",
+    "starlette",
+]

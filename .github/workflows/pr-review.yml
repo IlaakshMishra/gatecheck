@@ -1,0 +1,61 @@
+name: PR Review via Bedrock AgentCore
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_REVIEW_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Build PR diff
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
+
+      - name: Build payload and invoke Bedrock AgentCore
+        env:
+          AGENT_ARN: ${{ secrets.AGENT_ARN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO_URL: ${{ github.event.repository.html_url }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          SID="pr-review-${{ github.event.number }}-${{ github.run_id }}-000000000000"
+          SID="${SID:0:64}"
+
+          jq -n \
+            --rawfile diff /tmp/pr.diff \
+            --arg ac "$PR_BODY" \
+            --arg desc "$PR_TITLE" \
+            --arg url "$REPO_URL" \
+            --argjson num "$PR_NUMBER" \
+            '{pr_diff: $diff, acceptance_criteria: $ac, pr_description: $desc, repo_url: $url, pr_number: $num}' \
+            > /tmp/payload.json
+
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "$AGENT_ARN" \
+            --runtime-session-id "$SID" \
+            --payload fileb:///tmp/payload.json \
+            --region us-west-2 \
+            /tmp/response.json
+
+      - name: Print AgentCore response
+        run: |
+          echo "=== Bedrock AgentCore Response ==="
+          cat /tmp/response.json

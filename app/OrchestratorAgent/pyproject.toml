@@ -1,0 +1,12 @@
+[project]
+name = "gatecheck-orchestrator"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "bedrock-agentcore",
+    "bedrock-agentcore-starter-toolkit",
+    "langgraph",
+    "langchain-aws",
+    "boto3",
+    "requests",
+]
