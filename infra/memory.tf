@@ -1,5 +1,5 @@
 resource "aws_bedrockagentcore_memory" "shared" {
-  name        = "${var.project}-shared-memory"
+  name        = "${replace(var.project, "-", "_")}_shared_memory"
   description = "Team coding standards, AC patterns, review history"
 
   memory_execution_role_arn = aws_iam_role.agent_execution_role.arn

@@ -1,0 +1,60 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+!example.tfvars
+crash.log
+crash.*.log
+
+# AWS / Installers
+*.pkg
+*.dmg
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

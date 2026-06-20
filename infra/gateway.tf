@@ -1,36 +1,91 @@
+resource "aws_bedrockagentcore_api_key_credential_provider" "github" {
+  name               = "${var.project}-github-token"
+  api_key_wo         = var.github_token
+  api_key_wo_version = 1
+}
+
 resource "aws_bedrockagentcore_gateway" "github_gateway" {
-  name        = "${var.project}-github-gateway"
-  description = "GitHub API access for PR diff fetch and comment posting"
-
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
-
-  authorizer_configuration {
-    custom_jwt_authorizer {
-      discovery_url    = null
-      allowed_audience = []
-      allowed_clients  = []
-    }
-  }
+  name            = "${var.project}-github-gateway"
+  description     = "GitHub API access for PR diff fetch and comment posting"
+  role_arn        = aws_iam_role.agent_execution_role.arn
+  authorizer_type = "NONE"
 }
 
 resource "aws_bedrockagentcore_gateway_target" "github_api" {
-  name       = "github-api"
-  gateway_id = aws_bedrockagentcore_gateway.github_gateway.gateway_id
+  name               = "github-api"
+  gateway_identifier = aws_bedrockagentcore_gateway.github_gateway.gateway_id
 
   target_configuration {
-    open_api_schema {
-      uri         = "https://api.github.com"
-      description = "GitHub REST API for PR operations"
-
-      credential_provider {
-        # Known gap: grantType CLIENT_CREDENTIALS silently dropped in ~> 6.32.
-        # If gateway auth fails, call GitHub API directly from orchestrator code
-        # using the secret ARN — same security posture, less ceremony.
-        api_key_credential_provider {
-          credential_parameter_name = "Authorization"
-          secret_arn                = aws_secretsmanager_secret.github_token.arn
+    mcp {
+      open_api_schema {
+        inline_payload {
+          payload = jsonencode({
+            openapi = "3.0.0"
+            info = {
+              title   = "GitHub PR API"
+              version = "1.0"
+            }
+            servers = [{ url = "https://api.github.com" }]
+            paths = {
+              "/repos/{owner}/{repo}/pulls/{pull_number}" = {
+                get = {
+                  operationId = "getPullRequest"
+                  parameters = [
+                    { name = "owner", in = "path", required = true, schema = { type = "string" } },
+                    { name = "repo", in = "path", required = true, schema = { type = "string" } },
+                    { name = "pull_number", in = "path", required = true, schema = { type = "integer" } }
+                  ]
+                  responses = { "200" = { description = "PR details" } }
+                }
+              }
+              "/repos/{owner}/{repo}/pulls/{pull_number}/files" = {
+                get = {
+                  operationId = "listPullRequestFiles"
+                  parameters = [
+                    { name = "owner", in = "path", required = true, schema = { type = "string" } },
+                    { name = "repo", in = "path", required = true, schema = { type = "string" } },
+                    { name = "pull_number", in = "path", required = true, schema = { type = "integer" } }
+                  ]
+                  responses = { "200" = { description = "PR file diffs" } }
+                }
+              }
+              "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" = {
+                post = {
+                  operationId = "createPullRequestReview"
+                  parameters = [
+                    { name = "owner", in = "path", required = true, schema = { type = "string" } },
+                    { name = "repo", in = "path", required = true, schema = { type = "string" } },
+                    { name = "pull_number", in = "path", required = true, schema = { type = "integer" } }
+                  ]
+                  requestBody = {
+                    required = true
+                    content = {
+                      "application/json" = {
+                        schema = {
+                          type = "object"
+                          properties = {
+                            body  = { type = "string" }
+                            event = { type = "string", enum = ["APPROVE", "REQUEST_CHANGES", "COMMENT"] }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  responses = { "200" = { description = "Review created" } }
+                }
+              }
+            }
+          })
         }
       }
+    }
+  }
+
+  credential_provider_configuration {
+    api_key {
+      provider_arn              = aws_bedrockagentcore_api_key_credential_provider.github.credential_provider_arn
+      credential_parameter_name = "Authorization"
+      credential_prefix         = "token "
     }
   }
 }

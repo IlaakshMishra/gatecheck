@@ -1,5 +1,5 @@
 resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
-  agent_runtime_name = "${var.project}-orchestrator"
+  agent_runtime_name = "${replace(var.project, "-", "_")}_orchestrator"
   description        = "Coordinator: parses AC, fans out to sub-agents via A2A, synthesizes verdict"
 
   agent_runtime_artifact {
@@ -12,7 +12,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     network_mode = "PUBLIC"
   }
 
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
+  role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
     MODEL_ID             = var.model_id
@@ -33,7 +33,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "ac_verifier" {
-  agent_runtime_name = "${var.project}-ac-verifier"
+  agent_runtime_name = "${replace(var.project, "-", "_")}_ac_verifier"
   description        = "Maps each AC item to diff lines, returns PASS/FAIL/PARTIAL/UNVERIFIABLE"
 
   agent_runtime_artifact {
@@ -50,7 +50,7 @@ resource "aws_bedrockagentcore_agent_runtime" "ac_verifier" {
     server_protocol = "A2A"
   }
 
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
+  role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
     MODEL_ID = var.model_id
@@ -58,7 +58,7 @@ resource "aws_bedrockagentcore_agent_runtime" "ac_verifier" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "security_auditor" {
-  agent_runtime_name = "${var.project}-security-auditor"
+  agent_runtime_name = "${replace(var.project, "-", "_")}_security_auditor"
   description        = "OWASP checks, secrets scanning, IAM analysis, AC security items"
 
   agent_runtime_artifact {
@@ -75,7 +75,7 @@ resource "aws_bedrockagentcore_agent_runtime" "security_auditor" {
     server_protocol = "A2A"
   }
 
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
+  role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
     MODEL_ID = var.model_id
@@ -83,7 +83,7 @@ resource "aws_bedrockagentcore_agent_runtime" "security_auditor" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "perf_analyzer" {
-  agent_runtime_name = "${var.project}-perf-analyzer"
+  agent_runtime_name = "${replace(var.project, "-", "_")}_perf_analyzer"
   description        = "N+1 patterns, Big-O analysis, AC performance thresholds"
 
   agent_runtime_artifact {
@@ -100,7 +100,7 @@ resource "aws_bedrockagentcore_agent_runtime" "perf_analyzer" {
     server_protocol = "A2A"
   }
 
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
+  role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
     MODEL_ID = var.model_id
@@ -108,7 +108,7 @@ resource "aws_bedrockagentcore_agent_runtime" "perf_analyzer" {
 }
 
 resource "aws_bedrockagentcore_agent_runtime" "style_enforcer" {
-  agent_runtime_name = "${var.project}-style-enforcer"
+  agent_runtime_name = "${replace(var.project, "-", "_")}_style_enforcer"
   description        = "Naming, dead code, docstrings, team standards from memory"
 
   agent_runtime_artifact {
@@ -125,7 +125,7 @@ resource "aws_bedrockagentcore_agent_runtime" "style_enforcer" {
     server_protocol = "A2A"
   }
 
-  execution_role_arn = aws_iam_role.agent_execution_role.arn
+  role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
     MODEL_ID  = var.model_id
