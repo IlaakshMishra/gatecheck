@@ -34,7 +34,7 @@ resource "aws_iam_role_policy" "github_actions_review" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["bedrock-agentcore:InvokeAgentRuntime"]
-      Resource = aws_bedrockagentcore_agent_runtime.orchestrator.agent_runtime_arn
+      Resource = "*"
     }]
   })
 }
