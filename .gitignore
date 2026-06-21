@@ -46,8 +46,10 @@ crash.*.log
 *.pem
 *.key
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local settings and skills
+.claude/
+.agents/
+skills-lock.json
 
 # Logs
 *.log
