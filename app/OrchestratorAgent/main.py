@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 app = BedrockAgentCoreApp()
 
-MODEL_ID = "us.anthropic.claude-sonnet-4-6"
+MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
 AC_VERIFIER_ARN = os.environ["AC_VERIFIER_ARN"]
 SECURITY_AUDITOR_ARN = os.environ["SECURITY_AUDITOR_ARN"]

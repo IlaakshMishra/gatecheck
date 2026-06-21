@@ -67,6 +67,21 @@ resource "aws_iam_role_policy" "agent_policy" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = aws_secretsmanager_secret.github_token.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/gatecheck/*"
       }
     ]
   })
