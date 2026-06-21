@@ -202,155 +202,17 @@ def run_security_audit(pr_diff: str, ac_security_items: list[str]) -> dict:
     return final["result"]
 
 
-try:
-    from bedrock_agentcore.runtime import serve_a2a
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-    from a2a.server.agent_execution import AgentExecutor, RequestContext
-    from a2a.server.events import EventQueue
-    from a2a.server.tasks import TaskUpdater
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
+_app = BedrockAgentCoreApp()
 
-    class SecurityAuditorExecutor(AgentExecutor):
-        async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.submit()
-            await updater.start_work()
 
-            try:
-                user_message = context.get_user_input()
-                try:
-                    payload = json.loads(user_message)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"pr_diff": str(user_message), "ac_security_items": []}
+@_app.entrypoint
+async def handler(payload: dict) -> dict:
+    pr_diff = payload.get("pr_diff", "")
+    ac_security_items = payload.get("ac_security_items", [])
+    return run_security_audit(pr_diff, ac_security_items)
 
-                pr_diff = payload.get("pr_diff", "")
-                ac_security_items = payload.get("ac_security_items", [])
 
-                result = run_security_audit(pr_diff, ac_security_items)
-                output_text = json.dumps(result)
-
-                await updater.add_artifact(
-                    [TextPart(text=output_text)],
-                    name="security_audit_result",
-                )
-                await updater.complete()
-            except Exception as exc:
-                logger.error("SecurityAuditorExecutor error: %s", exc)
-                await updater.failed()
-
-        async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.failed()
-
-    agent_card = AgentCard(
-        name="SecurityAuditorAgent",
-        description=(
-            "Performs security auditing of PR diffs. Checks OWASP Top 10, hardcoded secrets, "
-            "IAM privilege escalation, SQL injection, XSS, command injection, path traversal, "
-            "and insecure deserialization."
-        ),
-        url="http://localhost:9000",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[
-            AgentSkill(
-                id="security_audit",
-                name="Security Audit",
-                description="Audit a PR diff for security vulnerabilities",
-                tags=["pr-review", "security", "owasp", "vulnerability"],
-                examples=[
-                    '{"pr_diff": "...", "ac_security_items": ["All user inputs must be sanitized"]}'
-                ],
-            )
-        ],
-        defaultInputModes=["application/json"],
-        defaultOutputModes=["application/json"],
-    )
-
-    if __name__ == "__main__":
-        serve_a2a(SecurityAuditorExecutor(), agent_card)
-
-except ImportError:
-    try:
-        import uvicorn
-        from a2a.server.agent_execution import AgentExecutor, RequestContext
-        from a2a.server.apps import A2AStarletteApplication
-        from a2a.server.events import EventQueue
-        from a2a.server.tasks import TaskUpdater
-        from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
-
-        class SecurityAuditorExecutor(AgentExecutor):
-            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.submit()
-                await updater.start_work()
-
-                try:
-                    user_message = context.get_user_input()
-                    try:
-                        payload = json.loads(user_message)
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"pr_diff": str(user_message), "ac_security_items": []}
-
-                    pr_diff = payload.get("pr_diff", "")
-                    ac_security_items = payload.get("ac_security_items", [])
-
-                    result = run_security_audit(pr_diff, ac_security_items)
-                    output_text = json.dumps(result)
-
-                    await updater.add_artifact(
-                        [TextPart(text=output_text)],
-                        name="security_audit_result",
-                    )
-                    await updater.complete()
-                except Exception as exc:
-                    logger.error("SecurityAuditorExecutor error: %s", exc)
-                    await updater.failed()
-
-            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.failed()
-
-        agent_card = AgentCard(
-            name="SecurityAuditorAgent",
-            description=(
-                "Performs security auditing of PR diffs. Checks OWASP Top 10, hardcoded secrets, "
-                "IAM privilege escalation, SQL injection, XSS, command injection, path traversal, "
-                "and insecure deserialization."
-            ),
-            url="http://localhost:9000",
-            version="1.0.0",
-            capabilities=AgentCapabilities(streaming=False),
-            skills=[
-                AgentSkill(
-                    id="security_audit",
-                    name="Security Audit",
-                    description="Audit a PR diff for security vulnerabilities",
-                    tags=["pr-review", "security", "owasp", "vulnerability"],
-                    examples=[
-                        '{"pr_diff": "...", "ac_security_items": ["All user inputs must be sanitized"]}'
-                    ],
-                )
-            ],
-            defaultInputModes=["application/json"],
-            defaultOutputModes=["application/json"],
-        )
-
-        if __name__ == "__main__":
-            a2a_app = A2AStarletteApplication(
-                agent_card=agent_card,
-                executor=SecurityAuditorExecutor(),
-            )
-            uvicorn.run(a2a_app.build(), host="0.0.0.0", port=9000)
-
-    except ImportError as imp_err:
-        logger.warning("A2A server libraries not available: %s", imp_err)
-
-        if __name__ == "__main__":
-            import sys
-            payload = json.load(sys.stdin)
-            result = run_security_audit(
-                payload.get("pr_diff", ""),
-                payload.get("ac_security_items", []),
-            )
-            print(json.dumps(result, indent=2))
+if __name__ == "__main__":
+    _app.run()

@@ -182,153 +182,17 @@ def run_perf_analysis(pr_diff: str, ac_perf_items: list[str]) -> dict:
     return final["result"]
 
 
-try:
-    from bedrock_agentcore.runtime import serve_a2a
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-    from a2a.server.agent_execution import AgentExecutor, RequestContext
-    from a2a.server.events import EventQueue
-    from a2a.server.tasks import TaskUpdater
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
+_app = BedrockAgentCoreApp()
 
-    class PerfAnalyzerExecutor(AgentExecutor):
-        async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.submit()
-            await updater.start_work()
 
-            try:
-                user_message = context.get_user_input()
-                try:
-                    payload = json.loads(user_message)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"pr_diff": str(user_message), "ac_perf_items": []}
+@_app.entrypoint
+async def handler(payload: dict) -> dict:
+    pr_diff = payload.get("pr_diff", "")
+    ac_perf_items = payload.get("ac_perf_items", [])
+    return run_perf_analysis(pr_diff, ac_perf_items)
 
-                pr_diff = payload.get("pr_diff", "")
-                ac_perf_items = payload.get("ac_perf_items", [])
 
-                result = run_perf_analysis(pr_diff, ac_perf_items)
-                output_text = json.dumps(result)
-
-                await updater.add_artifact(
-                    [TextPart(text=output_text)],
-                    name="perf_analysis_result",
-                )
-                await updater.complete()
-            except Exception as exc:
-                logger.error("PerfAnalyzerExecutor error: %s", exc)
-                await updater.failed()
-
-        async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.failed()
-
-    agent_card = AgentCard(
-        name="PerfAnalyzerAgent",
-        description=(
-            "Analyzes PR diffs for performance issues including N+1 queries, blocking I/O in async paths, "
-            "unbounded loops, Big-O regressions, missing indices, and response-time SLA violations."
-        ),
-        url="http://localhost:9000",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[
-            AgentSkill(
-                id="perf_analysis",
-                name="Performance Analysis",
-                description="Analyze a PR diff for performance issues",
-                tags=["pr-review", "performance", "optimization", "n+1", "async"],
-                examples=[
-                    '{"pr_diff": "...", "ac_perf_items": ["API response time must be < 200ms"]}'
-                ],
-            )
-        ],
-        defaultInputModes=["application/json"],
-        defaultOutputModes=["application/json"],
-    )
-
-    if __name__ == "__main__":
-        serve_a2a(PerfAnalyzerExecutor(), agent_card)
-
-except ImportError:
-    try:
-        import uvicorn
-        from a2a.server.agent_execution import AgentExecutor, RequestContext
-        from a2a.server.apps import A2AStarletteApplication
-        from a2a.server.events import EventQueue
-        from a2a.server.tasks import TaskUpdater
-        from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
-
-        class PerfAnalyzerExecutor(AgentExecutor):
-            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.submit()
-                await updater.start_work()
-
-                try:
-                    user_message = context.get_user_input()
-                    try:
-                        payload = json.loads(user_message)
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"pr_diff": str(user_message), "ac_perf_items": []}
-
-                    pr_diff = payload.get("pr_diff", "")
-                    ac_perf_items = payload.get("ac_perf_items", [])
-
-                    result = run_perf_analysis(pr_diff, ac_perf_items)
-                    output_text = json.dumps(result)
-
-                    await updater.add_artifact(
-                        [TextPart(text=output_text)],
-                        name="perf_analysis_result",
-                    )
-                    await updater.complete()
-                except Exception as exc:
-                    logger.error("PerfAnalyzerExecutor error: %s", exc)
-                    await updater.failed()
-
-            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.failed()
-
-        agent_card = AgentCard(
-            name="PerfAnalyzerAgent",
-            description=(
-                "Analyzes PR diffs for performance issues including N+1 queries, blocking I/O in async paths, "
-                "unbounded loops, Big-O regressions, missing indices, and response-time SLA violations."
-            ),
-            url="http://localhost:9000",
-            version="1.0.0",
-            capabilities=AgentCapabilities(streaming=False),
-            skills=[
-                AgentSkill(
-                    id="perf_analysis",
-                    name="Performance Analysis",
-                    description="Analyze a PR diff for performance issues",
-                    tags=["pr-review", "performance", "optimization", "n+1", "async"],
-                    examples=[
-                        '{"pr_diff": "...", "ac_perf_items": ["API response time must be < 200ms"]}'
-                    ],
-                )
-            ],
-            defaultInputModes=["application/json"],
-            defaultOutputModes=["application/json"],
-        )
-
-        if __name__ == "__main__":
-            a2a_app = A2AStarletteApplication(
-                agent_card=agent_card,
-                executor=PerfAnalyzerExecutor(),
-            )
-            uvicorn.run(a2a_app.build(), host="0.0.0.0", port=9000)
-
-    except ImportError as imp_err:
-        logger.warning("A2A server libraries not available: %s", imp_err)
-
-        if __name__ == "__main__":
-            import sys
-            payload = json.load(sys.stdin)
-            result = run_perf_analysis(
-                payload.get("pr_diff", ""),
-                payload.get("ac_perf_items", []),
-            )
-            print(json.dumps(result, indent=2))
+if __name__ == "__main__":
+    _app.run()

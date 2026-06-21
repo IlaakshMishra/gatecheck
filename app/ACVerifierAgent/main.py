@@ -157,153 +157,17 @@ def run_verification(pr_diff: str, acceptance_criteria_list: list[str]) -> dict:
     return final["result"]
 
 
-try:
-    from bedrock_agentcore.runtime import serve_a2a
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-    from a2a.server.agent_execution import AgentExecutor, RequestContext
-    from a2a.server.events import EventQueue
-    from a2a.server.tasks import TaskUpdater
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
+_app = BedrockAgentCoreApp()
 
-    class ACVerifierExecutor(AgentExecutor):
-        async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.submit()
-            await updater.start_work()
 
-            try:
-                user_message = context.get_user_input()
-                try:
-                    payload = json.loads(user_message)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"pr_diff": str(user_message), "acceptance_criteria_list": []}
+@_app.entrypoint
+async def handler(payload: dict) -> dict:
+    pr_diff = payload.get("pr_diff", "")
+    criteria_list = payload.get("acceptance_criteria_list", [])
+    return run_verification(pr_diff, criteria_list)
 
-                pr_diff = payload.get("pr_diff", "")
-                criteria_list = payload.get("acceptance_criteria_list", [])
 
-                result = run_verification(pr_diff, criteria_list)
-                output_text = json.dumps(result)
-
-                await updater.add_artifact(
-                    [TextPart(text=output_text)],
-                    name="ac_verification_result",
-                )
-                await updater.complete()
-            except Exception as exc:
-                logger.error("ACVerifierExecutor error: %s", exc)
-                await updater.failed()
-
-        async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.failed()
-
-    agent_card = AgentCard(
-        name="ACVerifierAgent",
-        description=(
-            "Verifies pull request diffs against acceptance criteria. "
-            "Returns PASS/FAIL/PARTIAL/UNVERIFIABLE for each criterion with evidence."
-        ),
-        url="http://localhost:9000",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[
-            AgentSkill(
-                id="verify_acceptance_criteria",
-                name="Verify Acceptance Criteria",
-                description="Check if a PR diff satisfies a list of acceptance criteria",
-                tags=["pr-review", "acceptance-criteria", "quality"],
-                examples=[
-                    '{"pr_diff": "...", "acceptance_criteria_list": ["Users can log in with OAuth"]}'
-                ],
-            )
-        ],
-        defaultInputModes=["application/json"],
-        defaultOutputModes=["application/json"],
-    )
-
-    if __name__ == "__main__":
-        serve_a2a(ACVerifierExecutor(), agent_card)
-
-except ImportError:
-    try:
-        import uvicorn
-        from a2a.server.agent_execution import AgentExecutor, RequestContext
-        from a2a.server.apps import A2AStarletteApplication
-        from a2a.server.events import EventQueue
-        from a2a.server.tasks import TaskUpdater
-        from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
-
-        class ACVerifierExecutor(AgentExecutor):
-            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.submit()
-                await updater.start_work()
-
-                try:
-                    user_message = context.get_user_input()
-                    try:
-                        payload = json.loads(user_message)
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"pr_diff": str(user_message), "acceptance_criteria_list": []}
-
-                    pr_diff = payload.get("pr_diff", "")
-                    criteria_list = payload.get("acceptance_criteria_list", [])
-
-                    result = run_verification(pr_diff, criteria_list)
-                    output_text = json.dumps(result)
-
-                    await updater.add_artifact(
-                        [TextPart(text=output_text)],
-                        name="ac_verification_result",
-                    )
-                    await updater.complete()
-                except Exception as exc:
-                    logger.error("ACVerifierExecutor error: %s", exc)
-                    await updater.failed()
-
-            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.failed()
-
-        agent_card = AgentCard(
-            name="ACVerifierAgent",
-            description=(
-                "Verifies pull request diffs against acceptance criteria. "
-                "Returns PASS/FAIL/PARTIAL/UNVERIFIABLE for each criterion with evidence."
-            ),
-            url="http://localhost:9000",
-            version="1.0.0",
-            capabilities=AgentCapabilities(streaming=False),
-            skills=[
-                AgentSkill(
-                    id="verify_acceptance_criteria",
-                    name="Verify Acceptance Criteria",
-                    description="Check if a PR diff satisfies a list of acceptance criteria",
-                    tags=["pr-review", "acceptance-criteria", "quality"],
-                    examples=[
-                        '{"pr_diff": "...", "acceptance_criteria_list": ["Users can log in with OAuth"]}'
-                    ],
-                )
-            ],
-            defaultInputModes=["application/json"],
-            defaultOutputModes=["application/json"],
-        )
-
-        if __name__ == "__main__":
-            a2a_app = A2AStarletteApplication(
-                agent_card=agent_card,
-                executor=ACVerifierExecutor(),
-            )
-            uvicorn.run(a2a_app.build(), host="0.0.0.0", port=9000)
-
-    except ImportError as imp_err:
-        logger.warning("A2A server libraries not available: %s", imp_err)
-
-        if __name__ == "__main__":
-            import sys
-            payload = json.load(sys.stdin)
-            result = run_verification(
-                payload.get("pr_diff", ""),
-                payload.get("acceptance_criteria_list", []),
-            )
-            print(json.dumps(result, indent=2))
+if __name__ == "__main__":
+    _app.run()
