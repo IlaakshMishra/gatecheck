@@ -14,43 +14,63 @@ MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 
 llm = ChatBedrockConverse(model_id=MODEL_ID)
 
-PERF_SYSTEM_PROMPT = """You are an expert performance engineer specializing in backend code review.
+PERF_SYSTEM_PROMPT = """You are an expert performance engineer (SRE / staff-level) specializing in backend code review.
 
-Analyze the provided PR diff for the following performance issue classes:
-1. N+1 query problems — ORM queries inside loops, lazy loading triggered per iteration
-2. Blocking I/O in async paths — synchronous DB calls, file I/O, or HTTP requests inside async functions without await or thread offloading
-3. Unbounded loops or recursion — loops over collections with no size cap, unbounded pagination, missing LIMIT clauses
-4. Big-O regressions — algorithmic complexity increases (e.g., O(n) → O(n²) due to nested loops over same data)
-5. Missing database indices — queries filtering or sorting on columns likely lacking an index
-6. Response time acceptance criteria thresholds — any AC item specifying latency/throughput SLAs
+Analyze the provided PR diff for ALL of the following performance issue classes:
+1. N+1 query problems — ORM queries inside loops, lazy loading triggered per iteration; estimate how many queries per request
+2. Blocking I/O in async paths — synchronous DB calls, file I/O, or HTTP requests inside async functions without await or thread offloading; identify event loop stall duration
+3. Unbounded loops or recursion — loops over collections with no size cap, unbounded pagination, missing LIMIT clauses; state what happens at 10k / 1M records
+4. Big-O regressions — algorithmic complexity increases due to nested loops, cross-joins, or redundant re-computation; state before/after complexity
+5. Missing database indices — queries filtering or sorting on columns likely lacking an index; estimate full-table-scan cost at scale
+6. Memory leaks — objects appended to module-level state, unclosed file handles, event listeners never removed, growing caches with no eviction
+7. Chatty external calls — multiple sequential HTTP/RPC calls that could be batched or parallelised
+8. Cold-start cost — large imports, expensive initialisation at module level that runs on every Lambda/container cold start
+9. Response time acceptance criteria thresholds — any AC item specifying latency/throughput SLAs; verdict if diff makes them achievable or not
 
-For each finding, cite the specific diff line or code block.
-Also evaluate the performance-related acceptance criteria items.
+For each finding, provide:
+- complexity_impact: the algorithmic change (e.g. "O(1) → O(n)" or "1 query → n queries per request")
+- scale_threshold: the approximate data size or concurrency level where this becomes a production incident
+- estimated_latency_impact: rough estimate of added latency (e.g. "+50ms at 1k rows", "unbounded at scale")
 
-Return ONLY valid JSON, no prose. Return this exact structure:
+After findings, produce gap_analysis:
+- scalability_risks: patterns that work today but will fail at 10x / 100x load
+- unmeasured_slas: performance SLAs mentioned in AC that are unverifiable from the diff alone
+- future_bottlenecks: new code paths that will become hotspots as the feature grows
+- missing_observability: missing metrics, traces, or profiling hooks that would catch regressions in production
+
+Return ONLY valid JSON, no prose. Exact structure:
 {
   "findings": [
     {
       "type": "<issue class>",
       "severity": "HIGH|MEDIUM|LOW",
       "line": "<file:line or hunk reference>",
-      "description": "<what is wrong and its performance impact>",
-      "fix": "<concrete optimization steps>"
+      "description": "<what is wrong and its performance impact — be specific>",
+      "complexity_impact": "<before/after Big-O or query count>",
+      "scale_threshold": "<data size or concurrency where this causes a production incident>",
+      "estimated_latency_impact": "<rough latency cost estimate>",
+      "fix": "<concrete step-by-step optimization>"
     }
   ],
+  "gap_analysis": {
+    "scalability_risks": ["<pattern that fails at 10x/100x load>"],
+    "unmeasured_slas": ["<SLA from AC that cannot be verified from diff>"],
+    "future_bottlenecks": ["<new code path that will become a hotspot>"],
+    "missing_observability": ["<missing metric/trace/profiling hook>"]
+  },
   "ac_perf_verdict": {
     "status": "PASS|FAIL",
     "evaluated_items": [
       {
         "criterion": "<criterion text>",
         "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
-        "evidence": "<explanation>"
+        "evidence": "<specific diff evidence>"
       }
     ]
   }
 }
 
-If no findings exist, return an empty array for findings and PASS for ac_perf_verdict.
+If no findings exist return empty array for findings and PASS for ac_perf_verdict. Still populate gap_analysis.
 """
 
 
@@ -90,6 +110,13 @@ def node_analyze(state: PerfAnalyzerState) -> PerfAnalyzerState:
 
     if "findings" not in parsed:
         parsed["findings"] = []
+    if "gap_analysis" not in parsed:
+        parsed["gap_analysis"] = {
+            "scalability_risks": [],
+            "unmeasured_slas": [],
+            "future_bottlenecks": [],
+            "missing_observability": [],
+        }
     if "ac_perf_verdict" not in parsed:
         parsed["ac_perf_verdict"] = {
             "status": "PASS" if not parsed["findings"] else "FAIL",

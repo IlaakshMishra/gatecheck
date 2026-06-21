@@ -17,44 +17,66 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 llm = ChatBedrockConverse(model_id=MODEL_ID)
 
-BASE_STYLE_SYSTEM_PROMPT = """You are a strict Python style enforcer for code reviews.
+BASE_STYLE_SYSTEM_PROMPT = """You are a strict Python style enforcer for code reviews (PEP8 / mypy / ruff expert level).
 
-Analyze the provided PR diff for the following style issues:
-1. Naming conventions — functions/methods must use snake_case, classes must use PascalCase, constants must use UPPER_SNAKE_CASE
-2. Dead code — unreachable code after return/raise, commented-out blocks of code, unused imports, unused variables
-3. Missing type hints — public functions and methods must have parameter and return type annotations
-4. Missing docstrings — public functions, classes, and methods (those not prefixed with _) must have docstrings
-5. Import order violations — imports must follow PEP 8 order: stdlib → third-party → local, each group separated by a blank line
+Analyze the provided PR diff for ALL of the following:
 
-For each finding, cite the specific diff line or hunk.
-Also evaluate the style-related acceptance criteria items.
+MANDATORY CHECKS:
+1. Naming conventions — snake_case for functions/methods/variables, PascalCase for classes, UPPER_SNAKE_CASE for module-level constants; flag every violation with exact line
+2. Dead code — unreachable code after return/raise, commented-out blocks (not explanatory comments), unused imports (check if the symbol appears anywhere in the diff), unused variables (assigned but never read)
+3. Missing type hints — every public function/method (not prefixed with _) must have: typed parameters, return type annotation, TypedDict or dataclass for complex return shapes
+4. Missing docstrings — every public function, class, and method (not prefixed with _) must have a docstring; one-liner is sufficient but must exist
+5. Import order violations — PEP 8: stdlib → third-party → local, blank line between each group; flag relative imports that should be absolute
+6. Magic numbers/strings — bare literals (numbers not named, strings not in constants) in logic paths; flag with suggested constant name
+7. Exception handling anti-patterns — bare `except:`, `except Exception: pass`, catching and silently swallowing exceptions
+8. Mutable default arguments — `def f(x=[])` or `def f(x={})` patterns
+9. Long functions — functions > 50 lines (flag with actual line count and suggestion to decompose)
+10. God objects / oversized modules — classes with > 10 public methods or modules > 300 lines in the diff
+
+For each finding:
+- rule_ref: the PEP8/mypy/ruff rule reference (e.g. "PEP8-E302", "mypy-return-type", "ruff-B006")
+- maintainability_score_impact: "HIGH" if this will cause bugs at refactor time, "MEDIUM" if it slows comprehension, "LOW" if cosmetic
+
+After findings, produce gap_analysis:
+- maintainability_risks: patterns that will cause breakage or confusion as the codebase grows
+- missing_contracts: public functions lacking type hints that will hurt static analysis and refactoring confidence
+- test_coverage_gaps: new code paths introduced with no visible unit test in the diff
+- tech_debt_introduced: shortcuts taken that will need to be revisited (comment with reason if you can infer it)
 
 {team_style_addendum}
 
-Return ONLY valid JSON, no prose. Return this exact structure:
+Return ONLY valid JSON, no prose. Exact structure:
 {{
   "findings": [
     {{
       "type": "<issue class>",
       "severity": "MEDIUM|LOW",
+      "rule_ref": "<PEP8/mypy/ruff rule ID>",
       "line": "<file:line or hunk reference>",
-      "description": "<what is wrong>",
-      "fix": "<how to fix it>"
+      "description": "<what is wrong and why it matters>",
+      "maintainability_score_impact": "HIGH|MEDIUM|LOW",
+      "fix": "<exact correction — show the fixed code snippet if < 3 lines>"
     }}
   ],
+  "gap_analysis": {{
+    "maintainability_risks": ["<pattern that causes breakage or confusion at scale>"],
+    "missing_contracts": ["<public function/class lacking type annotation>"],
+    "test_coverage_gaps": ["<new code path with no unit test in diff>"],
+    "tech_debt_introduced": ["<shortcut taken that needs future cleanup>"]
+  }},
   "ac_style_verdict": {{
     "status": "PASS|FAIL",
     "evaluated_items": [
       {{
         "criterion": "<criterion text>",
         "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
-        "evidence": "<explanation>"
+        "evidence": "<specific diff evidence>"
       }}
     ]
   }}
 }}
 
-If no findings exist, return an empty array for findings and PASS for ac_style_verdict.
+If no findings exist return empty array for findings and PASS for ac_style_verdict. Still populate gap_analysis.
 """
 
 
@@ -135,6 +157,13 @@ def node_enforce(state: StyleEnforcerState) -> StyleEnforcerState:
 
     if "findings" not in parsed:
         parsed["findings"] = []
+    if "gap_analysis" not in parsed:
+        parsed["gap_analysis"] = {
+            "maintainability_risks": [],
+            "missing_contracts": [],
+            "test_coverage_gaps": [],
+            "tech_debt_introduced": [],
+        }
     if "ac_style_verdict" not in parsed:
         parsed["ac_style_verdict"] = {
             "status": "PASS" if not parsed["findings"] else "FAIL",

@@ -22,17 +22,38 @@ For each acceptance criterion provided, examine the PR diff carefully and determ
 - PARTIAL: The diff partially implements the criterion but is incomplete
 - UNVERIFIABLE: Cannot determine from the diff alone (requires runtime, DB state, etc.)
 
-For each criterion, cite specific diff lines as evidence.
+For each criterion:
+1. Cite exact diff line or hunk references as evidence
+2. Assign confidence_score 0-100 (100 = certain, 0 = pure guess)
+3. List assumption_gaps — unstated assumptions that if wrong would flip your verdict
+4. List missing_coverage — test/verification signals that SHOULD appear in the diff but don't
 
-Return ONLY valid JSON, no prose. Return a JSON object with key "criteria" containing an array of objects:
-[
-  {
-    "criterion": "<original criterion text>",
-    "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
-    "evidence": "<specific explanation referencing diff content>",
-    "line_refs": ["<file:line or hunk reference>"]
+After evaluating all criteria, produce a gap_analysis:
+- unverified_risks: requirements the diff implies but cannot prove (env config, migrations, external services)
+- future_risks: code patterns introduced that could break acceptance criteria in subsequent PRs
+- missing_coverage: AC items with zero test coverage evidence in the diff
+
+Be precise and exhaustive. Treat absence of test coverage as a gap even if the criterion itself passes.
+
+Return ONLY valid JSON, no prose. Exact structure:
+{
+  "criteria": [
+    {
+      "criterion": "<original criterion text>",
+      "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
+      "confidence_score": <0-100>,
+      "evidence": "<specific explanation referencing diff line/hunk>",
+      "line_refs": ["<file:line or hunk reference>"],
+      "assumption_gaps": ["<assumption that if wrong changes the verdict>"],
+      "missing_coverage": ["<test or verification signal absent from diff>"]
+    }
+  ],
+  "gap_analysis": {
+    "unverified_risks": ["<AC requirement the diff implies but cannot prove>"],
+    "future_risks": ["<pattern introduced that could break AC in a later PR>"],
+    "missing_coverage": ["<AC item with no test coverage signals in the diff>"]
   }
-]
+}
 """
 
 
@@ -90,8 +111,15 @@ def node_verify(state: ACVerifierState) -> ACVerifierState:
         if isinstance(item, dict)
     )
 
+    gap_analysis = parsed.get("gap_analysis", {
+        "unverified_risks": [],
+        "future_risks": [],
+        "missing_coverage": [],
+    })
+
     state["result"] = {
         "criteria": criteria_results,
+        "gap_analysis": gap_analysis,
         "ac_verdict": {
             "status": "FAIL" if any_fail else "PASS",
             "total": len(criteria_results),
@@ -99,6 +127,10 @@ def node_verify(state: ACVerifierState) -> ACVerifierState:
             "failed": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "FAIL"),
             "partial": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "PARTIAL"),
             "unverifiable": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "UNVERIFIABLE"),
+            "avg_confidence": round(
+                sum(i.get("confidence_score", 50) for i in criteria_results if isinstance(i, dict))
+                / max(len(criteria_results), 1)
+            ),
         },
     }
     return state
