@@ -22,17 +22,38 @@ For each acceptance criterion provided, examine the PR diff carefully and determ
 - PARTIAL: The diff partially implements the criterion but is incomplete
 - UNVERIFIABLE: Cannot determine from the diff alone (requires runtime, DB state, etc.)
 
-For each criterion, cite specific diff lines as evidence.
+For each criterion:
+1. Cite exact diff line or hunk references as evidence
+2. Assign confidence_score 0-100 (100 = certain, 0 = pure guess)
+3. List assumption_gaps — unstated assumptions that if wrong would flip your verdict
+4. List missing_coverage — test/verification signals that SHOULD appear in the diff but don't
 
-Return ONLY valid JSON, no prose. Return a JSON object with key "criteria" containing an array of objects:
-[
-  {
-    "criterion": "<original criterion text>",
-    "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
-    "evidence": "<specific explanation referencing diff content>",
-    "line_refs": ["<file:line or hunk reference>"]
+After evaluating all criteria, produce a gap_analysis:
+- unverified_risks: requirements the diff implies but cannot prove (env config, migrations, external services)
+- future_risks: code patterns introduced that could break acceptance criteria in subsequent PRs
+- missing_coverage: AC items with zero test coverage evidence in the diff
+
+Be precise and exhaustive. Treat absence of test coverage as a gap even if the criterion itself passes.
+
+Return ONLY valid JSON, no prose. Exact structure:
+{
+  "criteria": [
+    {
+      "criterion": "<original criterion text>",
+      "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
+      "confidence_score": <0-100>,
+      "evidence": "<specific explanation referencing diff line/hunk>",
+      "line_refs": ["<file:line or hunk reference>"],
+      "assumption_gaps": ["<assumption that if wrong changes the verdict>"],
+      "missing_coverage": ["<test or verification signal absent from diff>"]
+    }
+  ],
+  "gap_analysis": {
+    "unverified_risks": ["<AC requirement the diff implies but cannot prove>"],
+    "future_risks": ["<pattern introduced that could break AC in a later PR>"],
+    "missing_coverage": ["<AC item with no test coverage signals in the diff>"]
   }
-]
+}
 """
 
 
@@ -90,8 +111,15 @@ def node_verify(state: ACVerifierState) -> ACVerifierState:
         if isinstance(item, dict)
     )
 
+    gap_analysis = parsed.get("gap_analysis", {
+        "unverified_risks": [],
+        "future_risks": [],
+        "missing_coverage": [],
+    })
+
     state["result"] = {
         "criteria": criteria_results,
+        "gap_analysis": gap_analysis,
         "ac_verdict": {
             "status": "FAIL" if any_fail else "PASS",
             "total": len(criteria_results),
@@ -99,6 +127,10 @@ def node_verify(state: ACVerifierState) -> ACVerifierState:
             "failed": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "FAIL"),
             "partial": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "PARTIAL"),
             "unverifiable": sum(1 for i in criteria_results if isinstance(i, dict) and i.get("status") == "UNVERIFIABLE"),
+            "avg_confidence": round(
+                sum(i.get("confidence_score", 50) for i in criteria_results if isinstance(i, dict))
+                / max(len(criteria_results), 1)
+            ),
         },
     }
     return state
@@ -125,153 +157,17 @@ def run_verification(pr_diff: str, acceptance_criteria_list: list[str]) -> dict:
     return final["result"]
 
 
-try:
-    from bedrock_agentcore.runtime import serve_a2a
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-    from a2a.server.agent_execution import AgentExecutor, RequestContext
-    from a2a.server.events import EventQueue
-    from a2a.server.tasks import TaskUpdater
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
+_app = BedrockAgentCoreApp()
 
-    class ACVerifierExecutor(AgentExecutor):
-        async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.submit()
-            await updater.start_work()
 
-            try:
-                user_message = context.get_user_input()
-                try:
-                    payload = json.loads(user_message)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"pr_diff": str(user_message), "acceptance_criteria_list": []}
+@_app.entrypoint
+async def handler(payload: dict) -> dict:
+    pr_diff = payload.get("pr_diff", "")
+    criteria_list = payload.get("acceptance_criteria_list", [])
+    return run_verification(pr_diff, criteria_list)
 
-                pr_diff = payload.get("pr_diff", "")
-                criteria_list = payload.get("acceptance_criteria_list", [])
 
-                result = run_verification(pr_diff, criteria_list)
-                output_text = json.dumps(result)
-
-                await updater.add_artifact(
-                    [TextPart(text=output_text)],
-                    name="ac_verification_result",
-                )
-                await updater.complete()
-            except Exception as exc:
-                logger.error("ACVerifierExecutor error: %s", exc)
-                await updater.failed()
-
-        async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.failed()
-
-    agent_card = AgentCard(
-        name="ACVerifierAgent",
-        description=(
-            "Verifies pull request diffs against acceptance criteria. "
-            "Returns PASS/FAIL/PARTIAL/UNVERIFIABLE for each criterion with evidence."
-        ),
-        url="http://localhost:9000",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[
-            AgentSkill(
-                id="verify_acceptance_criteria",
-                name="Verify Acceptance Criteria",
-                description="Check if a PR diff satisfies a list of acceptance criteria",
-                tags=["pr-review", "acceptance-criteria", "quality"],
-                examples=[
-                    '{"pr_diff": "...", "acceptance_criteria_list": ["Users can log in with OAuth"]}'
-                ],
-            )
-        ],
-        defaultInputModes=["application/json"],
-        defaultOutputModes=["application/json"],
-    )
-
-    if __name__ == "__main__":
-        serve_a2a(ACVerifierExecutor(), agent_card)
-
-except ImportError:
-    try:
-        import uvicorn
-        from a2a.server.agent_execution import AgentExecutor, RequestContext
-        from a2a.server.apps import A2AStarletteApplication
-        from a2a.server.events import EventQueue
-        from a2a.server.tasks import TaskUpdater
-        from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
-
-        class ACVerifierExecutor(AgentExecutor):
-            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.submit()
-                await updater.start_work()
-
-                try:
-                    user_message = context.get_user_input()
-                    try:
-                        payload = json.loads(user_message)
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"pr_diff": str(user_message), "acceptance_criteria_list": []}
-
-                    pr_diff = payload.get("pr_diff", "")
-                    criteria_list = payload.get("acceptance_criteria_list", [])
-
-                    result = run_verification(pr_diff, criteria_list)
-                    output_text = json.dumps(result)
-
-                    await updater.add_artifact(
-                        [TextPart(text=output_text)],
-                        name="ac_verification_result",
-                    )
-                    await updater.complete()
-                except Exception as exc:
-                    logger.error("ACVerifierExecutor error: %s", exc)
-                    await updater.failed()
-
-            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.failed()
-
-        agent_card = AgentCard(
-            name="ACVerifierAgent",
-            description=(
-                "Verifies pull request diffs against acceptance criteria. "
-                "Returns PASS/FAIL/PARTIAL/UNVERIFIABLE for each criterion with evidence."
-            ),
-            url="http://localhost:9000",
-            version="1.0.0",
-            capabilities=AgentCapabilities(streaming=False),
-            skills=[
-                AgentSkill(
-                    id="verify_acceptance_criteria",
-                    name="Verify Acceptance Criteria",
-                    description="Check if a PR diff satisfies a list of acceptance criteria",
-                    tags=["pr-review", "acceptance-criteria", "quality"],
-                    examples=[
-                        '{"pr_diff": "...", "acceptance_criteria_list": ["Users can log in with OAuth"]}'
-                    ],
-                )
-            ],
-            defaultInputModes=["application/json"],
-            defaultOutputModes=["application/json"],
-        )
-
-        if __name__ == "__main__":
-            a2a_app = A2AStarletteApplication(
-                agent_card=agent_card,
-                executor=ACVerifierExecutor(),
-            )
-            uvicorn.run(a2a_app.build(), host="0.0.0.0", port=9000)
-
-    except ImportError as imp_err:
-        logger.warning("A2A server libraries not available: %s", imp_err)
-
-        if __name__ == "__main__":
-            import sys
-            payload = json.load(sys.stdin)
-            result = run_verification(
-                payload.get("pr_diff", ""),
-                payload.get("acceptance_criteria_list", []),
-            )
-            print(json.dumps(result, indent=2))
+if __name__ == "__main__":
+    _app.run()

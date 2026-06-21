@@ -170,9 +170,221 @@ gatecheck/
 | STYLE    | LOW      | Missing type hint on `login` function   | Add `-> dict:`          |
 ```
 
+## Demo branches
+
+Two branches exist to show the system in action. Open PRs against `master` with the AC below to trigger the agent review.
+
+### `demo/ac-pass` — what a PASSING review looks like
+
+**PR description / acceptance criteria to paste:**
+
+```
+## What this PR does
+Adds offset-based pagination utility for all list API endpoints.
+
+## Acceptance Criteria
+- Paginated responses must include total_count, total_pages, has_next, has_previous fields
+- Page size must be capped at 100 items maximum
+- Page numbers must be 1-based; page < 1 must raise ValueError
+- All public functions must have type annotations and docstrings
+- Unit tests must cover: first page, last page, partial last page, empty sequence, invalid page
+- No raw SQL queries — pagination must be in-memory or use parameterized ORM filters
+- No hardcoded credentials or secrets
+```
+
+The diff (`app/utils/pagination.py` + `test_pagination.py`) satisfies every criterion. Expected GateCheck result: **PASS** with no security or AC findings.
+
+---
+
+### `demo/ac-fail` — what a FAILING review looks like
+
+**PR description / acceptance criteria to paste:**
+
+```
+## What this PR does
+Adds user management service with database access and IAM role for the demo app.
+
+## Acceptance Criteria
+- All IAM policies must follow least-privilege principle — no wildcard Action ("*") or wildcard Resource ("*")
+- No AWS managed AdministratorAccess policy may be attached to any IAM user or role
+- No hardcoded credentials, API keys, passwords, or tokens in source code
+- All database queries must use parameterized statements — string interpolation into SQL is prohibited
+- All user-supplied values passed to subprocess calls must be validated against an allowlist
+- All public functions must have type annotations and docstrings
+- Sensitive operations (delete, admin creation) must include authorization checks before execution
+- No secrets or passwords must appear in log output or stdout
+```
+
+The diff (`app/user_service.py` + `infra/demo_broken_iam.tf`) violates every criterion. Expected GateCheck result: **FAIL** with CRITICAL security findings across IAM, SQL injection, command injection, hardcoded credentials, and missing authorization.
+
+---
+
+## Plug GateCheck into any project
+
+GateCheck is repository-agnostic. The orchestrator only needs a PR diff, acceptance criteria text, and GitHub metadata — it has no opinion on language or framework.
+
+### Prerequisites
+
+- AWS account with Bedrock access (us-west-2 or update `var.aws_region`)
+- Bedrock model access enabled: **Claude Haiku 4.5** cross-region inference profile (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
+- Terraform 1.6+, Docker (ARM64 builds), AWS CLI v2
+- GitHub repo with Actions enabled
+
+### Step 1 — Clone and configure
+
+```bash
+git clone https://github.com/IlaakshMishra/gatecheck.git
+cd gatecheck
+```
+
+Edit `infra/variables.tf` to set your AWS region and project name:
+
+```hcl
+variable "aws_region" { default = "us-west-2" }
+variable "project"    { default = "your-project-name" }
+```
+
+Optionally swap the model by setting `TF_VAR_model_id` — any Bedrock cross-region inference profile works.
+
+### Step 2 — Provision AWS infrastructure
+
+```bash
+cd infra
+terraform init
+terraform apply -var="github_token=ghp_YOUR_TOKEN"
+```
+
+This creates (all names prefixed with your project name):
+- 5 ECR repositories
+- 5 BedrockAgentCore runtimes (orchestrator + 4 sub-agents)
+- IAM execution role with Bedrock, Secrets Manager, X-Ray, CloudWatch permissions
+- GitHub OIDC provider + review role (no long-lived keys)
+- Secrets Manager secret for the GitHub PAT
+- AgentCore Memory for team style guide
+- CloudWatch log groups, metric filters, alarms, dashboard
+- AgentCore Gateway for GitHub API access
+
+Note the outputs — you need `orchestrator_arn` and `github_actions_role_arn` for the next steps.
+
+### Step 3 — Build and push container images
+
+```bash
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-west-2
+
+aws ecr get-login-password --region $REGION \
+  | docker login --username AWS --password-stdin \
+    $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+
+ECR=$(terraform output -json ecr_urls)
+
+for agent in OrchestratorAgent ACVerifierAgent SecurityAuditorAgent PerfAnalyzerAgent StyleEnforcerAgent; do
+  KEY=$(echo $agent | sed 's/Agent//' | python3 -c "
+import sys, re
+s = sys.stdin.read().strip()
+s = re.sub(r'([A-Z])', r'-\1', s).lower().lstrip('-')
+print(s)
+")
+  URL=$(echo $ECR | python3 -c "import sys,json; print(json.load(sys.stdin)['$KEY'])")
+  docker buildx build --platform linux/arm64 -t $URL:latest --push app/$agent
+done
+```
+
+Verify all 5 runtimes reach ACTIVE state:
+
+```bash
+aws bedrock-agentcore-control list-agent-runtimes --region $REGION \
+  | python3 -c "import sys,json; [print(r['agentRuntimeName'], r['status']) for r in json.load(sys.stdin)['agentRuntimes']]"
+```
+
+### Step 4 — Copy the GitHub Actions workflow
+
+Copy `.github/workflows/pr-review.yml` from this repo into your target repository (the repo whose PRs you want reviewed). No code changes needed.
+
+```bash
+cp -r .github/workflows /path/to/your-repo/.github/
+```
+
+### Step 5 — Set GitHub secrets on your target repository
+
+Go to your repo → Settings → Secrets and variables → Actions → New repository secret:
+
+| Secret name | Value |
+|---|---|
+| `AWS_REVIEW_ROLE_ARN` | Output of `terraform output -raw github_actions_role_arn` |
+| `AGENT_ARN` | Output of `terraform output -raw orchestrator_arn` |
+
+### Step 6 — Add AC to your PR descriptions
+
+The orchestrator reads `acceptance_criteria` from the PR body. Use any format — bullet points, numbered list, prose. The AC Verifier agent parses it automatically.
+
+Recommended PR template (save as `.github/pull_request_template.md` in your repo):
+
+```markdown
+## What this PR does
+<!-- 1-3 sentence summary -->
+
+## Acceptance Criteria
+<!--
+List every testable requirement this PR must satisfy.
+GateCheck will evaluate each one against the diff.
+Examples:
+- Users can reset password via email link
+- Password reset tokens expire after 15 minutes
+- No raw SQL queries — use parameterized statements
+- All new public functions have type hints and docstrings
+- API endpoint returns 429 if rate limit exceeded
+-->
+```
+
+### Step 7 — Open a PR and watch GateCheck review it
+
+Open any PR on your target repo. Within ~60 seconds of opening or updating the PR, GateCheck posts a detailed review comment with:
+
+- AC verdict per criterion with confidence scores and gap analysis
+- Security findings with OWASP categories, attack vectors, and CVE examples
+- Performance findings with Big-O impact and scale thresholds
+- Style findings with rule references and maintainability impact
+- Collapsible gap analysis sections for each agent
+
+### Customising agent behaviour
+
+| What to change | Where |
+|---|---|
+| Security checks (add/remove vuln classes) | `app/SecurityAuditorAgent/main.py` → `SECURITY_SYSTEM_PROMPT` |
+| Performance thresholds | `app/PerfAnalyzerAgent/main.py` → `PERF_SYSTEM_PROMPT` |
+| Style rules (e.g. add Go/TypeScript rules) | `app/StyleEnforcerAgent/main.py` → `BASE_STYLE_SYSTEM_PROMPT` |
+| Team-specific style guide | Upload a `.md` file to AgentCore Memory; set `MEMORY_ID` env var |
+| Model (cost vs quality trade-off) | `infra/variables.tf` → `model_id` or `TF_VAR_model_id` |
+| Fail PR on style findings | `app/OrchestratorAgent/main.py` → `node_synthesize`, `style_findings` block |
+
+After any agent code change, rebuild and push the affected image, then force-recreate the runtime:
+
+```bash
+docker buildx build --platform linux/arm64 -t $ECR_URL:latest --push app/SecurityAuditorAgent
+terraform apply -replace=aws_bedrockagentcore_agent_runtime.security_auditor
+```
+
+### Cost estimate
+
+At ~100 PRs/month with average 500-line diffs, running Claude Haiku 4.5:
+
+| Component | Approx cost/month |
+|---|---|
+| Bedrock inference (5 agents × 100 PRs) | ~$8–15 |
+| AgentCore runtime (5 runtimes, minimal idle) | ~$5–10 |
+| ECR storage (5 images ~300MB each) | ~$1 |
+| CloudWatch logs + metrics | ~$2 |
+| **Total** | **~$16–28/month** |
+
+Switch to Claude Sonnet 4.6 for deeper analysis at ~3–5× the inference cost.
+
+---
+
 ## Key implementation notes
 
 - All 4 sub-agents invoked concurrently via `asyncio.gather` + `asyncio.to_thread` (real parallelism — boto3 is sync)
+- Security auditor always receives the full AC list regardless of category — security runs unconditionally
 - Session IDs padded to ≥ 33 chars (AgentCore requirement)
 - Sub-agent A2A servers: tries `bedrock_agentcore.runtime.serve_a2a` first, falls back to `A2AStarletteApplication` + uvicorn
 - Untrusted PR content (body, title) passed through env vars in GitHub Actions — never inline `${{ }}` in `run:` (shell injection prevention)
@@ -180,3 +392,4 @@ gatecheck/
 - `python:3.13-slim` base image — NOT the Lambda base (Lambda ENTRYPOINT conflicts with long-running server)
 - StyleEnforcerAgent reads team coding standards from AgentCore Memory when `MEMORY_ID` is set
 - Terraform pins `hashicorp/aws ~> 6.32` — run `terraform plan` before apply to catch provider schema changes
+- `:latest` tag does NOT trigger image refresh on BedrockAgentCore; use `terraform apply -replace=aws_bedrockagentcore_agent_runtime.<name>` after pushing new images

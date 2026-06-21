@@ -14,43 +14,63 @@ MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 
 llm = ChatBedrockConverse(model_id=MODEL_ID)
 
-PERF_SYSTEM_PROMPT = """You are an expert performance engineer specializing in backend code review.
+PERF_SYSTEM_PROMPT = """You are an expert performance engineer (SRE / staff-level) specializing in backend code review.
 
-Analyze the provided PR diff for the following performance issue classes:
-1. N+1 query problems — ORM queries inside loops, lazy loading triggered per iteration
-2. Blocking I/O in async paths — synchronous DB calls, file I/O, or HTTP requests inside async functions without await or thread offloading
-3. Unbounded loops or recursion — loops over collections with no size cap, unbounded pagination, missing LIMIT clauses
-4. Big-O regressions — algorithmic complexity increases (e.g., O(n) → O(n²) due to nested loops over same data)
-5. Missing database indices — queries filtering or sorting on columns likely lacking an index
-6. Response time acceptance criteria thresholds — any AC item specifying latency/throughput SLAs
+Analyze the provided PR diff for ALL of the following performance issue classes:
+1. N+1 query problems — ORM queries inside loops, lazy loading triggered per iteration; estimate how many queries per request
+2. Blocking I/O in async paths — synchronous DB calls, file I/O, or HTTP requests inside async functions without await or thread offloading; identify event loop stall duration
+3. Unbounded loops or recursion — loops over collections with no size cap, unbounded pagination, missing LIMIT clauses; state what happens at 10k / 1M records
+4. Big-O regressions — algorithmic complexity increases due to nested loops, cross-joins, or redundant re-computation; state before/after complexity
+5. Missing database indices — queries filtering or sorting on columns likely lacking an index; estimate full-table-scan cost at scale
+6. Memory leaks — objects appended to module-level state, unclosed file handles, event listeners never removed, growing caches with no eviction
+7. Chatty external calls — multiple sequential HTTP/RPC calls that could be batched or parallelised
+8. Cold-start cost — large imports, expensive initialisation at module level that runs on every Lambda/container cold start
+9. Response time acceptance criteria thresholds — any AC item specifying latency/throughput SLAs; verdict if diff makes them achievable or not
 
-For each finding, cite the specific diff line or code block.
-Also evaluate the performance-related acceptance criteria items.
+For each finding, provide:
+- complexity_impact: the algorithmic change (e.g. "O(1) → O(n)" or "1 query → n queries per request")
+- scale_threshold: the approximate data size or concurrency level where this becomes a production incident
+- estimated_latency_impact: rough estimate of added latency (e.g. "+50ms at 1k rows", "unbounded at scale")
 
-Return ONLY valid JSON, no prose. Return this exact structure:
+After findings, produce gap_analysis:
+- scalability_risks: patterns that work today but will fail at 10x / 100x load
+- unmeasured_slas: performance SLAs mentioned in AC that are unverifiable from the diff alone
+- future_bottlenecks: new code paths that will become hotspots as the feature grows
+- missing_observability: missing metrics, traces, or profiling hooks that would catch regressions in production
+
+Return ONLY valid JSON, no prose. Exact structure:
 {
   "findings": [
     {
       "type": "<issue class>",
       "severity": "HIGH|MEDIUM|LOW",
       "line": "<file:line or hunk reference>",
-      "description": "<what is wrong and its performance impact>",
-      "fix": "<concrete optimization steps>"
+      "description": "<what is wrong and its performance impact — be specific>",
+      "complexity_impact": "<before/after Big-O or query count>",
+      "scale_threshold": "<data size or concurrency where this causes a production incident>",
+      "estimated_latency_impact": "<rough latency cost estimate>",
+      "fix": "<concrete step-by-step optimization>"
     }
   ],
+  "gap_analysis": {
+    "scalability_risks": ["<pattern that fails at 10x/100x load>"],
+    "unmeasured_slas": ["<SLA from AC that cannot be verified from diff>"],
+    "future_bottlenecks": ["<new code path that will become a hotspot>"],
+    "missing_observability": ["<missing metric/trace/profiling hook>"]
+  },
   "ac_perf_verdict": {
     "status": "PASS|FAIL",
     "evaluated_items": [
       {
         "criterion": "<criterion text>",
         "status": "PASS|FAIL|PARTIAL|UNVERIFIABLE",
-        "evidence": "<explanation>"
+        "evidence": "<specific diff evidence>"
       }
     ]
   }
 }
 
-If no findings exist, return an empty array for findings and PASS for ac_perf_verdict.
+If no findings exist return empty array for findings and PASS for ac_perf_verdict. Still populate gap_analysis.
 """
 
 
@@ -90,6 +110,13 @@ def node_analyze(state: PerfAnalyzerState) -> PerfAnalyzerState:
 
     if "findings" not in parsed:
         parsed["findings"] = []
+    if "gap_analysis" not in parsed:
+        parsed["gap_analysis"] = {
+            "scalability_risks": [],
+            "unmeasured_slas": [],
+            "future_bottlenecks": [],
+            "missing_observability": [],
+        }
     if "ac_perf_verdict" not in parsed:
         parsed["ac_perf_verdict"] = {
             "status": "PASS" if not parsed["findings"] else "FAIL",
@@ -155,153 +182,17 @@ def run_perf_analysis(pr_diff: str, ac_perf_items: list[str]) -> dict:
     return final["result"]
 
 
-try:
-    from bedrock_agentcore.runtime import serve_a2a
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-    from a2a.server.agent_execution import AgentExecutor, RequestContext
-    from a2a.server.events import EventQueue
-    from a2a.server.tasks import TaskUpdater
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
+_app = BedrockAgentCoreApp()
 
-    class PerfAnalyzerExecutor(AgentExecutor):
-        async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.submit()
-            await updater.start_work()
 
-            try:
-                user_message = context.get_user_input()
-                try:
-                    payload = json.loads(user_message)
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"pr_diff": str(user_message), "ac_perf_items": []}
+@_app.entrypoint
+async def handler(payload: dict) -> dict:
+    pr_diff = payload.get("pr_diff", "")
+    ac_perf_items = payload.get("ac_perf_items", [])
+    return run_perf_analysis(pr_diff, ac_perf_items)
 
-                pr_diff = payload.get("pr_diff", "")
-                ac_perf_items = payload.get("ac_perf_items", [])
 
-                result = run_perf_analysis(pr_diff, ac_perf_items)
-                output_text = json.dumps(result)
-
-                await updater.add_artifact(
-                    [TextPart(text=output_text)],
-                    name="perf_analysis_result",
-                )
-                await updater.complete()
-            except Exception as exc:
-                logger.error("PerfAnalyzerExecutor error: %s", exc)
-                await updater.failed()
-
-        async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await updater.failed()
-
-    agent_card = AgentCard(
-        name="PerfAnalyzerAgent",
-        description=(
-            "Analyzes PR diffs for performance issues including N+1 queries, blocking I/O in async paths, "
-            "unbounded loops, Big-O regressions, missing indices, and response-time SLA violations."
-        ),
-        url="http://localhost:9000",
-        version="1.0.0",
-        capabilities=AgentCapabilities(streaming=False),
-        skills=[
-            AgentSkill(
-                id="perf_analysis",
-                name="Performance Analysis",
-                description="Analyze a PR diff for performance issues",
-                tags=["pr-review", "performance", "optimization", "n+1", "async"],
-                examples=[
-                    '{"pr_diff": "...", "ac_perf_items": ["API response time must be < 200ms"]}'
-                ],
-            )
-        ],
-        defaultInputModes=["application/json"],
-        defaultOutputModes=["application/json"],
-    )
-
-    if __name__ == "__main__":
-        serve_a2a(PerfAnalyzerExecutor(), agent_card)
-
-except ImportError:
-    try:
-        import uvicorn
-        from a2a.server.agent_execution import AgentExecutor, RequestContext
-        from a2a.server.apps import A2AStarletteApplication
-        from a2a.server.events import EventQueue
-        from a2a.server.tasks import TaskUpdater
-        from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TextPart
-
-        class PerfAnalyzerExecutor(AgentExecutor):
-            async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.submit()
-                await updater.start_work()
-
-                try:
-                    user_message = context.get_user_input()
-                    try:
-                        payload = json.loads(user_message)
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"pr_diff": str(user_message), "ac_perf_items": []}
-
-                    pr_diff = payload.get("pr_diff", "")
-                    ac_perf_items = payload.get("ac_perf_items", [])
-
-                    result = run_perf_analysis(pr_diff, ac_perf_items)
-                    output_text = json.dumps(result)
-
-                    await updater.add_artifact(
-                        [TextPart(text=output_text)],
-                        name="perf_analysis_result",
-                    )
-                    await updater.complete()
-                except Exception as exc:
-                    logger.error("PerfAnalyzerExecutor error: %s", exc)
-                    await updater.failed()
-
-            async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-                updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-                await updater.failed()
-
-        agent_card = AgentCard(
-            name="PerfAnalyzerAgent",
-            description=(
-                "Analyzes PR diffs for performance issues including N+1 queries, blocking I/O in async paths, "
-                "unbounded loops, Big-O regressions, missing indices, and response-time SLA violations."
-            ),
-            url="http://localhost:9000",
-            version="1.0.0",
-            capabilities=AgentCapabilities(streaming=False),
-            skills=[
-                AgentSkill(
-                    id="perf_analysis",
-                    name="Performance Analysis",
-                    description="Analyze a PR diff for performance issues",
-                    tags=["pr-review", "performance", "optimization", "n+1", "async"],
-                    examples=[
-                        '{"pr_diff": "...", "ac_perf_items": ["API response time must be < 200ms"]}'
-                    ],
-                )
-            ],
-            defaultInputModes=["application/json"],
-            defaultOutputModes=["application/json"],
-        )
-
-        if __name__ == "__main__":
-            a2a_app = A2AStarletteApplication(
-                agent_card=agent_card,
-                executor=PerfAnalyzerExecutor(),
-            )
-            uvicorn.run(a2a_app.build(), host="0.0.0.0", port=9000)
-
-    except ImportError as imp_err:
-        logger.warning("A2A server libraries not available: %s", imp_err)
-
-        if __name__ == "__main__":
-            import sys
-            payload = json.load(sys.stdin)
-            result = run_perf_analysis(
-                payload.get("pr_diff", ""),
-                payload.get("ac_perf_items", []),
-            )
-            print(json.dumps(result, indent=2))
+if __name__ == "__main__":
+    _app.run()

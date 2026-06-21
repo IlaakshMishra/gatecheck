@@ -46,10 +46,6 @@ resource "aws_bedrockagentcore_agent_runtime" "ac_verifier" {
     network_mode = "PUBLIC"
   }
 
-  protocol_configuration {
-    server_protocol = "A2A"
-  }
-
   role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
@@ -69,10 +65,6 @@ resource "aws_bedrockagentcore_agent_runtime" "security_auditor" {
 
   network_configuration {
     network_mode = "PUBLIC"
-  }
-
-  protocol_configuration {
-    server_protocol = "A2A"
   }
 
   role_arn = aws_iam_role.agent_execution_role.arn
@@ -96,10 +88,6 @@ resource "aws_bedrockagentcore_agent_runtime" "perf_analyzer" {
     network_mode = "PUBLIC"
   }
 
-  protocol_configuration {
-    server_protocol = "A2A"
-  }
-
   role_arn = aws_iam_role.agent_execution_role.arn
 
   environment_variables = {
@@ -119,10 +107,6 @@ resource "aws_bedrockagentcore_agent_runtime" "style_enforcer" {
 
   network_configuration {
     network_mode = "PUBLIC"
-  }
-
-  protocol_configuration {
-    server_protocol = "A2A"
   }
 
   role_arn = aws_iam_role.agent_execution_role.arn
